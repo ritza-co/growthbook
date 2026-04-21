@@ -26,9 +26,24 @@ pip install growthbook
 
 The simplest way to add GrowthBook to a standard WSGI Django project is a middleware that creates a fresh `GrowthBook` instance for every request, attaches it to `request`, and cleans up after the response is sent.
 
+### Configure the SDK key
+
+Read `GROWTHBOOK_CLIENT_KEY` from the environment so it is never committed to source control:
+
+```python title="settings.py"
+import os
+
+GROWTHBOOK_CLIENT_KEY = os.environ["GROWTHBOOK_CLIENT_KEY"]
+```
+
 ### Create the middleware
 
+:::warning Performance note
+`load_features()` makes a blocking HTTP request to the GrowthBook CDN. To avoid adding a CDN round-trip to every response, cache the feature payload with Django's cache framework (see [caching features](#caching-features)) or use the [async client](/lib/python#async-client-recommended) with an ASGI server instead.
+:::
+
 ```python title="myapp/middleware.py"
+from django.conf import settings
 from growthbook import GrowthBook
 
 
@@ -41,12 +56,12 @@ def growthbook_middleware(get_response):
     def middleware(request):
         request.gb = GrowthBook(
             api_host="https://cdn.growthbook.io",
-            client_key="sdk-abc123",
+            client_key=settings.GROWTHBOOK_CLIENT_KEY,
             on_experiment_viewed=on_experiment_viewed,
             attributes={
                 # Stable identifier for bucketing — use a UUID or database PK,
                 # not a session key, so assignments persist across sessions.
-                "id": str(request.user.pk) if request.user.is_authenticated else request.session.session_key,
+                "id": str(request.user.pk) if request.user.is_authenticated else (request.session.session_key or "anonymous"),
                 "loggedIn": request.user.is_authenticated,
                 "employee": getattr(request.user, "is_staff", False),
                 "country": request.META.get("HTTP_CF_IPCOUNTRY", ""),
@@ -54,10 +69,47 @@ def growthbook_middleware(get_response):
             },
         )
         request.gb.load_features()
+        try:
+            response = get_response(request)
+        finally:
+            request.gb.destroy()  # releases memory; always call this
+        return response
 
-        response = get_response(request)
+    return middleware
+```
 
-        request.gb.destroy()  # releases memory; always call this
+### Caching features
+
+Calling `load_features()` on every request hits the CDN each time. Cache the payload with Django's cache framework to fetch it once and reuse it across requests:
+
+```python title="myapp/middleware.py"
+from django.conf import settings
+from django.core.cache import cache
+from growthbook import GrowthBook
+
+FEATURES_CACHE_KEY = "growthbook_features"
+FEATURES_CACHE_TTL = 60  # seconds
+
+
+def growthbook_middleware(get_response):
+    def middleware(request):
+        features = cache.get(FEATURES_CACHE_KEY)
+        request.gb = GrowthBook(
+            api_host="https://cdn.growthbook.io",
+            client_key=settings.GROWTHBOOK_CLIENT_KEY,
+            features=features,  # None on first request — load_features() fetches and stores it
+            attributes={
+                "id": str(request.user.pk) if request.user.is_authenticated else (request.session.session_key or "anonymous"),
+                "loggedIn": request.user.is_authenticated,
+            },
+        )
+        if features is None:
+            request.gb.load_features()
+            cache.set(FEATURES_CACHE_KEY, request.gb.features, FEATURES_CACHE_TTL)
+        try:
+            response = get_response(request)
+        finally:
+            request.gb.destroy()
         return response
 
     return middleware
@@ -135,6 +187,7 @@ When a feature flag controls whether a user can *access* a resource, put the Gro
 `dispatch()` on a `View` subclass runs before any HTTP method, making it the right place to check the flag:
 
 ```python title="myapp/views.py"
+from django.conf import settings
 from django.http import HttpResponseForbidden
 from django.views import View
 from growthbook import GrowthBook
@@ -144,11 +197,11 @@ class BetaFeatureView(View):
     def dispatch(self, request, *args, **kwargs):
         gb = GrowthBook(
             api_host="https://cdn.growthbook.io",
-            client_key="sdk-abc123",
+            client_key=settings.GROWTHBOOK_CLIENT_KEY,
             attributes={
-                    "id": str(request.user.pk) if request.user.is_authenticated else "anonymous",
-                    "beta": request.user.groups.filter(name="beta").exists() if request.user.is_authenticated else False,
-                },
+                "id": str(request.user.pk) if request.user.is_authenticated else "anonymous",
+                "beta": request.user.groups.filter(name="beta").exists() if request.user.is_authenticated else False,
+            },
         )
         gb.load_features()
 
@@ -157,8 +210,10 @@ class BetaFeatureView(View):
             return HttpResponseForbidden("This feature is not available yet.")
 
         request.gb = gb
-        response = super().dispatch(request, *args, **kwargs)
-        gb.destroy()
+        try:
+            response = super().dispatch(request, *args, **kwargs)
+        finally:
+            gb.destroy()
         return response
 
     def get(self, request):
@@ -171,6 +226,7 @@ A decorator keeps the access check reusable across function-based views:
 
 ```python title="myapp/decorators.py"
 from functools import wraps
+from django.conf import settings
 from django.http import HttpResponseForbidden
 from growthbook import GrowthBook
 
@@ -181,7 +237,7 @@ def require_feature(flag_key):
         def wrapper(request, *args, **kwargs):
             gb = GrowthBook(
                 api_host="https://cdn.growthbook.io",
-                client_key="sdk-abc123",
+                client_key=settings.GROWTHBOOK_CLIENT_KEY,
                 attributes={"id": str(request.user.pk)},
             )
             gb.load_features()
@@ -210,6 +266,7 @@ def checkout(request):
 With DRF, a `BasePermission` subclass is the natural integration point. When `has_permission` returns `False`, DRF responds with a 403:
 
 ```python title="myapp/permissions.py"
+from django.conf import settings
 from rest_framework.permissions import BasePermission
 from growthbook import GrowthBook
 
@@ -231,7 +288,7 @@ class FeatureFlagPermission(BasePermission):
 
         gb = GrowthBook(
             api_host="https://cdn.growthbook.io",
-            client_key="sdk-abc123",
+            client_key=settings.GROWTHBOOK_CLIENT_KEY,
             attributes={"id": str(request.user.pk), "loggedIn": request.user.is_authenticated},
         )
         gb.load_features()
@@ -278,10 +335,11 @@ class FeatureConsumer(AsyncWebsocketConsumer):
         # Grab the authenticated user from the scope populated by AuthMiddlewareStack
         user = self.scope.get("user")
 
+        from django.conf import settings
         self.gb_client = GrowthBookClient(
             Options(
                 api_host="https://cdn.growthbook.io",
-                client_key="sdk-abc123",
+                client_key=settings.GROWTHBOOK_CLIENT_KEY,
             )
         )
         await self.gb_client.initialize()
@@ -349,6 +407,7 @@ Each task function gets its own `GrowthBook` instance. Sharing one instance acro
 
 ```python title="myapp/tasks.py"
 from celery import shared_task
+from django.conf import settings
 from growthbook import GrowthBook
 
 
@@ -360,7 +419,7 @@ def on_experiment_viewed(experiment, result, **kwargs):
 def send_weekly_digest(user_id: int, user_email: str, is_premium: bool):
     gb = GrowthBook(
         api_host="https://cdn.growthbook.io",
-        client_key="sdk-abc123",
+        client_key=settings.GROWTHBOOK_CLIENT_KEY,
         on_experiment_viewed=on_experiment_viewed,
         attributes={
             "id": str(user_id),
@@ -372,13 +431,13 @@ def send_weekly_digest(user_id: int, user_email: str, is_premium: bool):
 
     try:
         use_new_template = gb.is_on("new-digest-template")
-        subject_variant = gb.get_feature_value("digest-subject-line", "Your weekly digest")
+        subject = gb.get_feature_value("digest-subject-line", "Your weekly digest")
 
         if use_new_template:
-            # render and send with new template
+            # render and send with new template using subject
             pass
         else:
-            # render and send with old template
+            # render and send with old template using subject
             pass
     finally:
         gb.destroy()  # ensure cleanup even if sending fails
@@ -389,6 +448,7 @@ def send_weekly_digest(user_id: int, user_email: str, is_premium: bool):
 Management commands run in their own process with no request context. The attributes come from whatever data source is available, often a queryset or a configuration value:
 
 ```python title="myapp/management/commands/run_experiment_report.py"
+from django.conf import settings
 from django.core.management.base import BaseCommand
 from growthbook import GrowthBook
 
@@ -404,7 +464,7 @@ class Command(BaseCommand):
 
         gb = GrowthBook(
             api_host="https://cdn.growthbook.io",
-            client_key="sdk-abc123",
+            client_key=settings.GROWTHBOOK_CLIENT_KEY,
             attributes={
                 # Use a stable string that represents this job's context,
                 # not a runtime value like time.time(), so bucketing is consistent

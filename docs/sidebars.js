@@ -960,7 +960,7 @@ export default {
           type: "doc",
           id: "lib/django",
           label: "Django",
-          className: "sidebar-icon-python",
+          className: "sidebar-icon-django",
         },
         {
           type: "doc",
