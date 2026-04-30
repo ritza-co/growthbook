@@ -238,7 +238,11 @@ def require_feature(flag_key):
             gb = GrowthBook(
                 api_host="https://cdn.growthbook.io",
                 client_key=settings.GROWTHBOOK_CLIENT_KEY,
-                attributes={"id": str(request.user.pk)},
+                attributes={
+                    "id": str(request.user.pk)
+                    if request.user.is_authenticated
+                    else (request.session.session_key or "anonymous")
+                },
             )
             gb.load_features()
             enabled = gb.is_on(flag_key)
