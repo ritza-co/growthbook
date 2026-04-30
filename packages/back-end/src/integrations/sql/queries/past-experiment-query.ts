@@ -40,7 +40,7 @@ export function getPastExperimentQuery(
             MAX(${dialect.castUserDateCol("timestamp")}) as latest_data
           FROM
             (
-              ${compileSqlTemplate(q.query, { startDate: from })}
+              ${compileSqlTemplate(q.query, { startDate: from }, dialect)}
             ) e${i}
           WHERE
             timestamp > ${dialect.toTimestamp(from)}

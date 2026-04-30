@@ -724,6 +724,7 @@ export default abstract class SqlIntegration
         startDate,
         templateVariables,
       },
+      this.getSqlDialect(),
     );
     return format(limitedQuery, dialect.formatDialect);
   }
@@ -1523,6 +1524,7 @@ export default abstract class SqlIntegration
     );
 
     const { experimentDimensions } = processDimensions(
+      this.getSqlDialect(),
       params.dimensions,
       settings,
       activationMetric,
@@ -1643,12 +1645,16 @@ export default abstract class SqlIntegration
             : ""
         }
         , __newExposures AS (
-          ${compileSqlTemplate(exposureQuery.query, {
-            startDate: settings.startDate,
-            endDate: settings.endDate,
-            experimentId: settings.experimentId,
-            // TODO(incremental-refresh): add incremental start data as template variable
-          })}
+          ${compileSqlTemplate(
+            exposureQuery.query,
+            {
+              startDate: settings.startDate,
+              endDate: settings.endDate,
+              experimentId: settings.experimentId,
+              // TODO(incremental-refresh): add incremental start data as template variable
+            },
+            this.getSqlDialect(),
+          )}
         )
         , __filteredNewExposures AS (
           SELECT 
@@ -2384,6 +2390,7 @@ export default abstract class SqlIntegration
     // exploratory dimensions
     const { experimentDimensions, unitDimensions, dateDimension } =
       processDimensions(
+        this.getSqlDialect(),
         params.dimensionsForAnalysis,
         params.settings,
         params.activationMetric,
@@ -2737,11 +2744,15 @@ export default abstract class SqlIntegration
           id,
           {
             ...ft,
-            sql: compileSqlTemplate(ft.sql, {
-              startDate: dateRange.startDate,
-              endDate: dateRange.endDate,
-              templateVariables,
-            }),
+            sql: compileSqlTemplate(
+              ft.sql,
+              {
+                startDate: dateRange.startDate,
+                endDate: dateRange.endDate,
+                templateVariables,
+              },
+              this.getSqlDialect(),
+            ),
           },
         ];
       }),
@@ -2756,10 +2767,14 @@ export default abstract class SqlIntegration
     );
 
     return {
-      sql: compileSqlTemplate(sql, {
-        startDate: dateRange.startDate,
-        endDate: dateRange.endDate,
-      }),
+      sql: compileSqlTemplate(
+        sql,
+        {
+          startDate: dateRange.startDate,
+          endDate: dateRange.endDate,
+        },
+        this.getSqlDialect(),
+      ),
       orderedMetricIds,
       startDate: dateRange.startDate,
       endDate: dateRange.endDate,
