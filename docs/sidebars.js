@@ -71,6 +71,7 @@ export default {
           collapsed: false,
           items: [
             "features/publishing-and-approval-flows", // Publishing & Approval Flows (NEW)
+            "features/json-schema-validation", // JSON Schema Validation
             "features/stale-detection", // Stale Feature Detection
             "features/code-references", // Code References
             "features/diagnostics", // Feature Diagnostics
@@ -955,6 +956,12 @@ export default {
           id: "lib/python",
           label: "Python",
           className: "sidebar-icon-python",
+        },
+        {
+          type: "doc",
+          id: "lib/django",
+          label: "Django",
+          className: "sidebar-icon-django",
         },
         {
           type: "doc",

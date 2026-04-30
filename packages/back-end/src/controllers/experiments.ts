@@ -1214,18 +1214,32 @@ export async function postExperiments(
   try {
     validateVariationIds(obj.variations);
 
-    // Make sure id is unique
-    if (obj.trackingKey && !req.query.allowDuplicateTrackingKey) {
+    // Make sure tracking key is unique
+    if (
+      obj.trackingKey &&
+      (org.settings?.requireUniqueExperimentTrackingKeys ||
+        !req.query.allowDuplicateTrackingKey)
+    ) {
       const existing = await getExperimentByTrackingKey(
         context,
         obj.trackingKey,
       );
       if (existing) {
-        return res.status(200).json({
-          status: 200,
-          duplicateTrackingKey: true,
-          existingId: existing.id,
-        });
+        // If organization requires unique tracking keys, always reject duplicates
+        if (org.settings?.requireUniqueExperimentTrackingKeys) {
+          return res.status(400).json({
+            status: 400,
+            message: `An experiment with tracking key "${obj.trackingKey}" already exists. Your organization requires unique experiment tracking keys.`,
+          });
+        }
+        // Otherwise, allow duplicates only if explicitly requested
+        if (!req.query.allowDuplicateTrackingKey) {
+          return res.status(200).json({
+            status: 200,
+            duplicateTrackingKey: true,
+            existingId: existing.id,
+          });
+        }
       }
     }
 
@@ -1497,19 +1511,53 @@ export async function postExperiment(
     validateVariationIds(data.variations);
   }
 
+  // Check if tracking key is being changed and validate uniqueness if required
   if (
+    data.trackingKey &&
+    data.trackingKey !== experiment.trackingKey &&
+    org.settings?.requireUniqueExperimentTrackingKeys
+  ) {
+    const existing = await getExperimentByTrackingKey(
+      context,
+      data.trackingKey,
+    );
+    if (existing) {
+      res.status(400).json({
+        status: 400,
+        message: `An experiment with tracking key "${data.trackingKey}" already exists. Your organization requires unique experiment tracking keys.`,
+      });
+      return;
+    }
+  }
+
+  const experimentHasLinkedChanges =
+    experiment.hasURLRedirects ||
+    experiment.hasVisualChangesets ||
+    (experiment.linkedFeatures && experiment.linkedFeatures.length > 0);
+  if (
+    // Holdout change
     data.holdoutId &&
     data.holdoutId !== experiment.holdoutId &&
     experiment.holdoutId
   ) {
-    if (
-      experiment.status !== "draft" ||
-      experiment.hasURLRedirects ||
-      experiment.hasVisualChangesets ||
-      (experiment.linkedFeatures && experiment.linkedFeatures.length > 0)
-    ) {
+    if (experiment.status !== "draft" || experimentHasLinkedChanges) {
       throw new Error(
         "Cannot change holdout after experiment has been run or linked changes have been added",
+      );
+    }
+    await context.models.holdout.removeExperimentFromHoldout(
+      experiment.holdoutId,
+      experiment.id,
+    );
+  } else if (
+    // Holdout removal
+    data.holdoutId == "" &&
+    data.holdoutId !== experiment.holdoutId &&
+    experiment.holdoutId
+  ) {
+    if (experiment.status !== "draft" || experimentHasLinkedChanges) {
+      throw new Error(
+        "Cannot remove experiment from holdout after experiment has been run or linked changes have been added",
       );
     }
     await context.models.holdout.removeExperimentFromHoldout(
